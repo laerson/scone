@@ -113,7 +113,6 @@ k8s_pull_test() {
   local ns="${NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)}"
   local name="pull-$(echo "$image" | tr '/:.' '-' | cut -c1-55)"
 
-  # Clean previous run
   kubectl delete pod -n "$ns" "$name" --ignore-not-found --now >/dev/null 2>&1 || true
 
   cat <<YAML | kubectl apply -n "$ns" -f -
@@ -124,58 +123,67 @@ metadata:
   labels:
     app: image-pull-test
 spec:
+  serviceAccountName: scone-runner        # use your SA with events/pods perms
   restartPolicy: Never
   imagePullSecrets:
-  - name: scone-registry
-  # target goes first so its events mention the image we care about
+  - name: scone-registry                  # harmless for public images
   containers:
+  # TARGET: must be runnable; we give an invalid binary (no shell required)
   - name: target
     image: "$image"
     imagePullPolicy: Always
+    command: ["/nonexistent"]             # forces start attempt after pull
+  # KEEPER: keeps pod alive so we can inspect events/status
   - name: keeper
     image: busybox:1.36
+    imagePullPolicy: IfNotPresent
     command: ["sh","-lc","sleep 600"]
 YAML
 
-  # Images are fetched before "Initialized" becomes True
-  if ! kubectl wait -n "$ns" --for=condition=Initialized pod/"$name" --timeout=180s; then
+  # Wait until init is done (images get fetched before this flips True)
+  if ! kubectl -n "$ns" wait --for=condition=Initialized pod/"$name" --timeout=300s; then
     echo "❌ Pod did not initialize"
     kubectl -n "$ns" describe pod "$name" | sed 's/^/  /'
     kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
     return 1
   fi
 
-  # Check for REAL pull errors first
-  reason="$(kubectl -n "$ns" get pod "$name" -o jsonpath='{range .status.containerStatuses[?(@.name=="target")]}{.state.waiting.reason}{.state.terminated.reason}{" "}{end}')"
-  if [[ "$reason" == *"ErrImagePull"* || "$reason" == *"ImagePullBackOff"* ]]; then
-    echo "❌ Pull failed for $image ($reason)"
-    kubectl -n "$ns" describe pod "$name" | sed 's/^/  /'
-    kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
-    return 1
-  fi
+  # Fail only on *real pull* errors
+  for _ in {1..120}; do
+    # Check waiting/terminated reasons on the target
+    reason=$(kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.containerStatuses[?(@.name=="target")].state.waiting.reason}{.status.containerStatuses[?(@.name=="target")].state.terminated.reason}')
+    case "$reason" in
+      ErrImagePull|ImagePullBackOff)
+        echo "❌ Pull failed for $image ($reason)"
+        kubectl -n "$ns" describe pod "$name" | sed 's/^/  /'
+        kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+        return 1
+        ;;
+    esac
 
-  # Success if kubelet emitted a Pulled event for this image
-  if kubectl -n "$ns" get events --field-selector involvedObject.name="$name",reason=Pulled \
-      | grep -q "$image"; then
-    echo "✅ Pulled: $image (per kubelet events)"
-    kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
-    return 0
-  fi
+    # Success if kubelet emitted a Pulled event…
+    if kubectl -n "$ns" get events --field-selector involvedObject.name="$name",reason=Pulled | grep -q "$image"; then
+      echo "✅ Pulled: $image (per kubelet events)"
+      kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+      return 0
+    fi
 
-  # Or success if imageID is recorded (container created at least once)
-  imageID="$(kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.containerStatuses[?(@.name=="target")].imageID}')"
-  if [[ -n "$imageID" ]]; then
-    echo "✅ Pulled: $image ($imageID)"
-    kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
-    return 0
-  fi
+    # …or if imageID is recorded
+    imageID=$(kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.containerStatuses[?(@.name=="target")].imageID}')
+    if [[ -n "$imageID" ]]; then
+      echo "✅ Pulled: $image ($imageID)"
+      kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 2
+  done
 
-  # If we reached here, we neither saw a real pull error nor evidence of a pull
   echo "❌ Timed out determining pull status for $image"
   kubectl -n "$ns" describe pod "$name" | sed 's/^/  /'
   kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
   return 1
 }
+
 
 try_pull() {
   local image="$1"
