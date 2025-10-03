@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: scone-toolbox
+  namespace: scone-tools
+spec:
+  serviceAccountName: scone-runner
+  imagePullSecrets:
+  - name: app-regcred
+  restartPolicy: Never
+  containers:
+  - name: scone
+    image: registry-git.lsd.ufcg.edu.br/laerson.verissimo/sos-images:scone-latest
+    imagePullPolicy: Always
+    tty: true
+    stdin: true
+    volumeMounts:
+    - name: scone-env
+      mountPath: /scone-registry.env
+      subPath: scone-registry.env
+      readOnly: true
+  volumes:
+  - name: scone-env
+    secret:
+      secretName: scone-registry-env
+
