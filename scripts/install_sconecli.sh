@@ -1,179 +1,162 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-set -euo pipefail 
-LILAC='\033[1;35m'
-RESET='\033[0m'
+LILAC='\033[1;35m'; RESET='\033[0m'; RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+
 printf "${LILAC}"
-cat <<EOF
+cat <<'EOHDR'
 # SCONE CLI
 
-You can run the ['scone' CLI](https://sconedocs.github.io/CAS_cli/) on your **host machine**, within a **virtual machine (VM)**, or inside a **container**. While running it in a container offers good portability, it may suffer from slower startup times. Therefore, we recommend installing the 'scone' CLI **directly on your development machine** for better performance.
-
-This document explains how to install the 'scone' CLI on **Linux distributions that support Debian packages**. Packages are also available for **Alpine Linux**.
+You can run the ['scone' CLI](https://sconedocs.github.io/CAS_cli/) on your **host machine**, within a **virtual machine (VM)**, or inside a **container**. Running in a container is portable but can be slower; installing on your dev machine is fastest.
 
 ## Caveat When Running Inside a Container
 
 There are two versions of the 'scone' CLI:
+- a **native version** (cannot run inside an enclave)
+- the **default version** (designed to run inside an enclave)
 
-- A **native version** that cannot run inside an enclave
-- The **default version**, which is designed to run **inside an enclave**
-  
-By default, the 'scone' CLI of a container runs confidential in production mode. To run in simulation mode on systems that do not support production TEEs, set the environment variable 'SCONE_PRODUCTION=0', e.g., you can run'SCONE_PRODUCTION=0 scone --help' .
+If you do not have production TEEs, set `SCONE_PRODUCTION=0` to run in simulation, e.g.:
+`SCONE_PRODUCTION=0 scone --help`.
 
-Below, we describe how to install the 'scone' CLI using 'auto' mode, i.e., the CLI will most likely run in simulation mode.
+We'll install the CLI on Debian/Ubuntu via packages contained in an image.
 
-## Installing the 'scone' CLI 
-
-We assume in this description that you run a Debian-based distribution like Ubuntu. Note that we also have packages for Alpine Linux.
-
-EOF
+EOHDR
 printf "${RESET}"
 
-# determine the latest stable version of SCONE:
-VERSION=$(curl -L -s https://raw.githubusercontent.com/scontain/scone/refs/heads/main/stable.txt)
+# --- Discover version ---
+VERSION="$(curl -sSL https://raw.githubusercontent.com/scontain/scone/refs/heads/main/stable.txt)"
 echo "The lastest stable version of SCONE is $VERSION"
-LILAC='\033[1;35m'
-RESET='\033[0m'
+
 printf "${LILAC}"
-cat <<EOF
+cat <<'EOVERIFY'
+The SCONE CLI is available as Debian packages inside a container image.
+We verify that image with cosign, then extract the packages (without Docker).
 
-The SCONE CLI is available as Debian packages as part of a container image. 
-We first verify that the container image is properly signed by cosign.
-
-To do so, we define the cosign public verification key using a function 'create_cosign_verification_key'.
-We verify the signature of a given container image with function 'verify_image':
-
-EOF
+EOVERIFY
 printf "${RESET}"
 
-#
-# create a file with the public key of the signer key for all scone.cloud images
-#
-
-function create_cosign_verification_key() {
-    export cosign_public_key_file="$(mktemp).pub"
-    cat > $cosign_public_key_file <<EOF
+# --- Cosign public key for scone.cloud images ---
+create_cosign_verification_key() {
+  export cosign_public_key_file="$(mktemp).pub"
+  cat > "$cosign_public_key_file" <<'EOKEY'
 -----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErLf0HT8xZlLaoX5jNN8aVL1Yrs+P
 wS7K6tXeRlWLlUX1GeEtTdcuhZMKb5VUNaWEJW2ZU0YIF91D93dCZbUYpw==
 -----END PUBLIC KEY-----
-EOF
+EOKEY
 }
 
-function verify_image() {
-    local image_name
-    image_name="$1"
-    if [[ "$image_name" == "" ]]; then
-        echo "The name of the image for which we should verify the signature, was empty. Exiting."
-        exit 1
-    fi
-
-    echo "Verifying the signature of image '$image_name'"
-
-    docker pull "$image_name" >/dev/null
-    export cosign_public_key_file=${cosign_public_key_file:-""}
-    if [[ "$cosign_public_key_file" == "" ]]; then
-        create_cosign_verification_key
-    fi
-    cosign verify --key "$cosign_public_key_file" "$image_name" >/dev/null 2> /dev/null || { echo "Failed to verify signature of image '$image_name'! Exiting! Please check that 'cosign version' shows a git version >= 2.0.0. Also ensure that there is no field 'credsStore' in '$HOME/.docker/config.json'"; exit 1; }
-
-    echo " - verification was successful"
+verify_image() {
+  local image_name="${1:-}"
+  if [[ -z "$image_name" ]]; then
+    echo "Image name is empty"; exit 1
+  fi
+  echo "Verifying the signature of image '$image_name'"
+  : "${cosign_public_key_file:=}"; [[ -z "${cosign_public_key_file}" ]] && create_cosign_verification_key
+  # cosign talks to the registry directly; no Docker daemon required
+  cosign verify --key "$cosign_public_key_file" "$image_name" >/dev/null 2>&1 \
+    || { echo -e "${RED}Failed to verify signature of '$image_name'. Ensure 'cosign version' >= 2.0.0.${RESET}"; exit 1; }
+  echo " - verification was successful"
 }
-LILAC='\033[1;35m'
-RESET='\033[0m'
+
+# --- K8s-based extractor (no Docker) ---
+extract_packages_via_k8s() {
+  local image="$1"
+  local ns="${NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo default)}"
+  local sa="${SERVICE_ACCOUNT:-scone-runner}"
+  local pullsecret="${SCONE_PULL_SECRET:-scone-registry}"
+  local name="extract-$(echo "$image" | tr '/:.' '-' | cut -c1-55)"
+  local workdir="${WORKDIR:-/tmp/sconecli_pkgs}"
+
+  mkdir -p "$workdir"
+  echo -e "${YELLOW}Creating ephemeral pod '$name' in namespace '$ns' to extract /packages ...${RESET}"
+
+  # Clean any previous pod
+  kubectl -n "$ns" delete pod "$name" --ignore-not-found --now >/dev/null 2>&1 || true
+
+  # Start the pod; this image contains a shell, so keep it running
+  cat <<YAML | kubectl apply -n "$ns" -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $name
+  labels: { app: sconecli-extract }
+spec:
+  serviceAccountName: $sa
+  restartPolicy: Never
+  imagePullSecrets:
+  - name: $pullsecret
+  containers:
+  - name: target
+    image: "$image"
+    imagePullPolicy: Always
+    command: ["sh","-lc","sleep 600"]
+YAML
+
+  # Wait until container is running (so kubectl cp works)
+  kubectl -n "$ns" wait --for=condition=ContainersReady pod/"$name" --timeout=300s >/dev/null
+
+  # Copy the /packages directory out of the pod
+  echo "Copying packages from pod ..."
+  kubectl -n "$ns" cp "$name:packages" "$workdir/packages"
+
+  # Cleanup the pod
+  kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+
+  echo "Packages staged at: $workdir/packages"
+  echo "$workdir"
+}
+
+# --- Main flow ---
+REPO="registry.scontain.com/scone.cloud"
+IMAGE="scone-deb-pkgs"
+PKG_IMG="$REPO/$IMAGE:$VERSION"
+
+verify_image "$PKG_IMG"
+
 printf "${LILAC}"
-cat <<EOF
-
-Next, we define the image that contains the 'scone' CLI Debian package and
-verify the image:
-
-EOF
+cat <<'EOCOPY'
+After successful verification, we extract the Debian packages from the image
+(via an ephemeral Kubernetes pod) and install them locally.
+EOCOPY
 printf "${RESET}"
 
-# default repo and image name
-export REPO="registry.scontain.com/scone.cloud"
-export IMAGE="scone-deb-pkgs"
+# Extract packages (no Docker)
+STAGE_DIR="$(extract_packages_via_k8s "$PKG_IMG")"
+PKG_DIR="$STAGE_DIR/packages"
 
-verify_image "$REPO/$IMAGE:$VERSION"
-LILAC='\033[1;35m'
-RESET='\033[0m'
+# Install the packages (we run as root inside the toolbox container, no sudo needed)
+dpkg -i "$PKG_DIR"/scone-common_amd64.deb
+dpkg -i "$PKG_DIR"/scone-libc_amd64.deb
+dpkg -i "$PKG_DIR"/scone-cli_amd64.deb
+dpkg -i "$PKG_DIR"/k8s-scone.deb
+dpkg -i "$PKG_DIR"/kubectl-scone.deb
+
+# Cleanup staged files
+rm -rf "$STAGE_DIR"
+
 printf "${LILAC}"
-cat <<EOF
-
-After successful verification, we create a temporary container
-to be able to copy the Debian packages to the local filesystem.
-
-EOF
+cat <<'EOCHECK'
+We ensure that 'kubectl-scone' plugin only exists once - otherwise 'kubectl' prints a warning:
+EOCHECK
 printf "${RESET}"
-
-# run container such that we can copy the packages to a local repo
-docker create --name scone-packages "$REPO/$IMAGE:$VERSION" sleep 1 > /dev/null
-LILAC='\033[1;35m'
-RESET='\033[0m'
-printf "${LILAC}"
-cat <<EOF
-
-Next, we copy the package to the '/tmp' directory and
-install the 'scone' packages. 
-
-You need to type your 'sudo' password:
-
-EOF
-printf "${RESET}"
-
-# copy the packages
-mkdir -p /tmp/packages
-docker cp scone-packages:/packages /tmp/
-docker rm scone-packages
-
-# install the packages
-sudo dpkg -i /tmp/packages/scone-common_amd64.deb 
-sudo dpkg -i /tmp/packages/scone-libc_amd64.deb 
-sudo dpkg -i /tmp/packages/scone-cli_amd64.deb 
-sudo dpkg -i /tmp/packages/k8s-scone.deb
-sudo dpkg -i /tmp/packages/kubectl-scone.deb 
-
-# clean up
-rm -rf /tmp/packages
-LILAC='\033[1;35m'
-RESET='\033[0m'
-printf "${LILAC}"
-cat <<EOF
-
-We ensure that 'kubectl-scone' plugin only exists once - otherwise, 'kubectl' issues a warning:
-
-EOF
-printf "${RESET}"
-
 
 if [[ -e /usr/bin/kubectl-scone && -e /bin/kubectl-scone ]] ; then
-    P1=$(realpath /usr/bin/kubectl-scone )
-    P2=$(realpath /bin/kubectl-scone )
-    if [[ -n "$P1" && -n "$P2" && "$P1" != "$P2" ]]; then
-        rm -f "$P2"
-    fi
+  P1=$(realpath /usr/bin/kubectl-scone )
+  P2=$(realpath /bin/kubectl-scone )
+  if [[ -n "$P1" && -n "$P2" && "$P1" != "$P2" ]]; then
+    rm -f "$P2"
+  fi
 fi
-LILAC='\033[1;35m'
-RESET='\033[0m'
-printf "${LILAC}"
-cat <<EOF
-
-Check that the 'scone' cli is properly installed by executing:
-
-EOF
-printf "${RESET}"
 
 echo "Expecting SCONE version: $VERSION"
-scone --version
-LILAC='\033[1;35m'
-RESET='\033[0m'
-printf "${LILAC}"
-cat <<EOF
+scone --version || { echo -e "${RED}SCONE CLI not found after install${RESET}"; exit 1; }
 
-This should execute the same SCONE version as the previously printed latest stable version.
+printf "${LILAC}"
+cat <<'EOFTRAIL'
+This should match the latest stable version printed above.
 (The minimal version is 5.10.1)
 
-EOF
+✅ All scone-related executables installed (containerd/Kubernetes mode)
+EOFTRAIL
 printf "${RESET}"
-
-  echo "✅ All scone-related executable installed"
