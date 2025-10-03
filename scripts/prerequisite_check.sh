@@ -112,23 +112,39 @@ k8s_pull_test() {
   local image="$1"
   local ns="${NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)}"
   local name="pull-$(echo "$image" | tr '/:.' '-' | cut -c1-55)"
+
+  # Clean up any previous run
+  kubectl delete pod -n "$ns" "$name" --ignore-not-found --now >/dev/null 2>&1 || true
+
   cat <<YAML | kubectl apply -n "$ns" -f -
 apiVersion: v1
 kind: Pod
 metadata:
   name: $name
+  labels:
+    app: image-pull-test
 spec:
   restartPolicy: Never
   imagePullSecrets:
-  - name: scone-registry
+  - name: scone-registry      # harmless for public images; required for private ones
   containers:
   - name: c
     image: "$image"
-    command: ["sh","-lc","echo OK"]
+    command: ["sh","-lc","sleep 600"]  # keep container running long enough to become Ready
 YAML
-  kubectl wait -n "$ns" --for=condition=Ready pod/$name --timeout=180s || return 1
-  kubectl logs -n "$ns" $name || true
-  kubectl delete pod -n "$ns" $name --now --ignore-not-found
+
+  # Wait until the container is actually running (image pulled + started)
+  if kubectl wait -n "$ns" --for=condition=ContainersReady pod/"$name" --timeout=180s; then
+    echo "✅ Pulled and started: $image"
+    kubectl delete pod -n "$ns" "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+    return 0
+  else
+    echo "❌ Failed to get ContainersReady for $image"
+    echo "— Pod events:"
+    kubectl describe pod -n "$ns" "$name" | sed 's/^/  /'
+    kubectl delete pod -n "$ns" "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+    return 1
+  fi
 }
 
 try_pull() {
