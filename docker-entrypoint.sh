@@ -18,7 +18,7 @@ else
 fi
 
 cd "$HOME"
-git clone https://github.com/scontain/scone.git || true
+git clone https://github.com/laerson/scone.git || true
 
 ~/scone/scripts/prerequisite_check.sh
 
