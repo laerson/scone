@@ -108,6 +108,38 @@ install_yq_v4() {
   echo "✔️ yq installed successfully."
 }
 
+k8s_pull_test() {
+  local image="$1"
+  local ns="${NAMESPACE:-$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)}"
+  local name="pull-$(echo "$image" | tr '/:.' '-' | cut -c1-55)"
+  cat <<YAML | kubectl apply -n "$ns" -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $name
+spec:
+  restartPolicy: Never
+  imagePullSecrets:
+  - name: scone-registry
+  containers:
+  - name: c
+    image: "$image"
+    command: ["sh","-lc","echo OK"]
+YAML
+  kubectl wait -n "$ns" --for=condition=Ready pod/$name --timeout=180s || return 1
+  kubectl logs -n "$ns" $name || true
+  kubectl delete pod -n "$ns" $name --now --ignore-not-found
+}
+
+try_pull() {
+  local image="$1"
+  if command -v docker >/dev/null 2>&1 && [ -S /var/run/docker.sock ]; then
+    docker pull "$image"
+  else
+    k8s_pull_test "$image"
+  fi
+}
+
 # Check and Auto install Yq Version 4
 if check_command yq; then
     yq_version=$(yq --version 2>&1 | grep -oP 'v\d+' | cut -d'v' -f2) || yq_version=""
@@ -193,21 +225,9 @@ images=(
 )
 
 for image in "${images[@]}"; do
-  echo "Pulling $image ..."
-  if ! docker pull "$image"; then
-    # If pull failed and we have creds, retry once after explicit login
-    if [[ -n "${SCONE_REGISTRY_ACCESS_TOKEN:-}" && -n "${SCONE_REGISTRY_USERNAME:-}" ]]; then
-      echo -e "${RED}Pull failed. Re-authenticating and retrying...${NC}"
-      scone_registry_login
-      docker pull "$image" || { echo -e "${RED}❌ Cannot pull Docker image: $image${NC}"; exit 1; }
-    else
-      echo -e "${RED}❌ Cannot pull Docker image: $image (no creds)${NC}"
-      echo "If this is a private image, set SCONE_REGISTRY_USERNAME and SCONE_REGISTRY_ACCESS_TOKEN."
-      exit 1
-    fi
-  else
-    echo "✅ image '$image' is accessible"
-  fi
+  echo "Checking $image ..."
+  try_pull "$image" || { echo -e "${RED}❌ Cannot pull $image${NC}"; exit 1; }
+  echo "✅ $image OK"
 done
 
 echo -e "${GREEN}✔️ All images are OK.${NC}"
