@@ -7,7 +7,14 @@ mkdir -p ~/.kube
 if [[ -f /kubeconfig ]]; then
   cp /kubeconfig ~/.kube/config
 else
-  APISERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+  APISERVER="${APISERVER:-}"
+  if [[ -z "$APISERVER" ]]; then
+    if [[ -n "${KUBERNETES_SERVICE_HOST:-}" && -n "${KUBERNETES_SERVICE_PORT:-}" ]]; then
+      APISERVER="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+    else
+      APISERVER="https://kubernetes.default.svc"
+    fi
+  fi
   TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
   CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
   NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
