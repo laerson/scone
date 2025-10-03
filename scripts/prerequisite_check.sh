@@ -179,27 +179,38 @@ echo "The lastest stable version of SCONE is $VERSION"
 
 echo -e "${YELLOW}📦 Checking access to required container images...${NC}"
 
-if ! docker pull --quiet "registry.scontain.com/public-images/glibc:2.39-v3" &>/dev/null; then
-      echo -e "${RED}❌ Cannot pull Docker image - trying to log in${NC}"
-      scone_registry_login
+if [[ -n "${SCONE_REGISTRY_ACCESS_TOKEN:-}" && -n "${SCONE_REGISTRY_USERNAME:-}" ]]; then
+  scone_registry_login
+else
+  echo "No SCONE registry credentials found in env; will attempt public pulls and fail fast on private images."
 fi
 
-  images=(
-    "registry.scontain.com/scone.cloud/sconecli:$VERSION"
-    "registry.scontain.com/scone.cloud/scone-deb-pkgs:$VERSION"
-    "registry.scontain.com/scone.cloud/sconecli:$VERSION"
-    "registry.scontain.com/public-images/glibc:2.35-v4"
-    "registry.scontain.com/public-images/glibc:2.39-v3"
-  )
-  for image in "${images[@]}"; do
-    if ! docker pull --quiet "$image" &>/dev/null; then
-      echo -e "${RED}❌ Cannot pull Docker image: $image${NC}"
-      exit 1
+images=(
+  "registry.scontain.com/scone.cloud/sconecli:$VERSION"
+  "registry.scontain.com/scone.cloud/scone-deb-pkgs:$VERSION"
+  "registry.scontain.com/public-images/glibc:2.35-v4"
+  "registry.scontain.com/public-images/glibc:2.39-v3"
+)
+
+for image in "${images[@]}"; do
+  echo "Pulling $image ..."
+  if ! docker pull "$image"; then
+    # If pull failed and we have creds, retry once after explicit login
+    if [[ -n "${SCONE_REGISTRY_ACCESS_TOKEN:-}" && -n "${SCONE_REGISTRY_USERNAME:-}" ]]; then
+      echo -e "${RED}Pull failed. Re-authenticating and retrying...${NC}"
+      scone_registry_login
+      docker pull "$image" || { echo -e "${RED}❌ Cannot pull Docker image: $image${NC}"; exit 1; }
     else
-      echo "✅ image '$image' is accessible"
+      echo -e "${RED}❌ Cannot pull Docker image: $image (no creds)${NC}"
+      echo "If this is a private image, set SCONE_REGISTRY_USERNAME and SCONE_REGISTRY_ACCESS_TOKEN."
+      exit 1
     fi
-  done
-  echo -e "${GREEN}✔️ All images are OK.${NC}"
+  else
+    echo "✅ image '$image' is accessible"
+  fi
+done
+
+echo -e "${GREEN}✔️ All images are OK.${NC}"
 LILAC='\033[1;35m'
 RESET='\033[0m'
 printf "${LILAC}"
