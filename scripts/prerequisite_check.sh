@@ -126,26 +126,50 @@ metadata:
 spec:
   restartPolicy: Never
   imagePullSecrets:
-  - name: scone-registry      # harmless for public images; required for private ones
+  - name: scone-registry
   containers:
-  - name: c
+  # Keeper stays up so the Pod becomes Ready even if the target exits/crashes
+  - name: keeper
+    image: busybox:1.36
+    imagePullPolicy: IfNotPresent
+    command: ["sh","-lc","sleep 600"]
+  # The image we're testing. No command override (works even if image has no /bin/sh)
+  - name: target
     image: "$image"
-    command: ["sh","-lc","sleep 600"]  # keep container running long enough to become Ready
+    imagePullPolicy: Always
 YAML
 
-  # Wait until the container is actually running (image pulled + started)
-  if kubectl wait -n "$ns" --for=condition=ContainersReady pod/"$name" --timeout=180s; then
-    echo "✅ Pulled and started: $image"
-    kubectl delete pod -n "$ns" "$name" --now --ignore-not-found >/dev/null 2>&1 || true
-    return 0
-  else
-    echo "❌ Failed to get ContainersReady for $image"
-    echo "— Pod events:"
-    kubectl describe pod -n "$ns" "$name" | sed 's/^/  /'
-    kubectl delete pod -n "$ns" "$name" --now --ignore-not-found >/dev/null 2>&1 || true
-    return 1
-  fi
+  # Wait until the pod is Initialized (images pulled and containers created)
+  kubectl wait -n "$ns" --for=condition=Initialized pod/"$name" --timeout=180s || {
+    echo "❌ Pod did not initialize"; kubectl -n "$ns" describe pod "$name"; return 1; }
+
+  # Poll the target container status: fail only on real pull errors
+  for i in {1..60}; do
+    status_json="$(kubectl -n "$ns" get pod "$name" -o json)"
+    reason="$(echo "$status_json" | jq -r '.status.containerStatuses[] | select(.name=="target") | (.state.waiting.reason // .state.terminated.reason // "running")')"
+    imageID="$(echo "$status_json" | jq -r '.status.containerStatuses[] | select(.name=="target") | (.imageID // "")')"
+
+    if [[ "$reason" == "ErrImagePull" || "$reason" == "ImagePullBackOff" ]]; then
+      echo "❌ Pull failed for $image ($reason)"
+      kubectl -n "$ns" describe pod "$name" | sed 's/^/  /'
+      kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+      return 1
+    fi
+
+    if [[ -n "$imageID" && "$imageID" != "null" ]]; then
+      echo "✅ Pulled: $image ($imageID)"
+      kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 3
+  done
+
+  echo "❌ Timed out waiting for pull of $image"
+  kubectl -n "$ns" describe pod "$name" | sed 's/^/  /'
+  kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
+  return 1
 }
+
 
 try_pull() {
   local image="$1"
