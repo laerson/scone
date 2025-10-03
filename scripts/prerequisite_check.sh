@@ -183,11 +183,13 @@ else
   echo "✔️ sed is already installed."
 fi
 
-# Check Kubernetes cluster connectivity
-if ! kubectl cluster-info &>/dev/null; then
-  echo -e "${RED}❌ No Kubernetes cluster detected via kubectl. Is your cluster running?${NC}"
+NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo default)"
+if ! kubectl auth can-i --namespace "$NS" list pods >/dev/null 2>&1; then
+  echo -e "${RED}❌ kubectl is configured but this ServiceAccount lacks permissions (cannot list pods in namespace '$NS').${NC}"
+  echo "Grant the Role in '$NS' or use a different ServiceAccount."
   exit 1
 fi
+echo "✅ kubectl is configured and RBAC allows basic ops in namespace '$NS'"
 
 echo "✅ All external executables are installed and ready"
 LILAC='\033[1;35m'
