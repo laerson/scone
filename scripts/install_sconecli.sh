@@ -69,13 +69,13 @@ extract_packages_via_k8s() {
   local workdir="${WORKDIR:-/tmp/sconecli_pkgs}"
 
   mkdir -p "$workdir"
-  echo -e "${YELLOW}Creating ephemeral pod '$name' in namespace '$ns' to extract /packages ...${RESET}"
 
-  # Clean any previous pod
+  # --- all LOGGING goes to stderr ---
+  echo "Creating ephemeral pod '$name' in namespace '$ns' to extract /packages ..." >&2
+
   kubectl -n "$ns" delete pod "$name" --ignore-not-found --now >/dev/null 2>&1 || true
 
-  # Start the pod; this image contains a shell, so keep it running
-  cat <<YAML | kubectl apply -n "$ns" -f -
+  cat <<YAML | kubectl apply -n "$ns" -f - >/dev/null
 apiVersion: v1
 kind: Pod
 metadata:
@@ -93,17 +93,20 @@ spec:
     command: ["sh","-lc","sleep 600"]
 YAML
 
-  # Wait until container is running (so kubectl cp works)
   kubectl -n "$ns" wait --for=condition=ContainersReady pod/"$name" --timeout=300s >/dev/null
 
-  # Copy the /packages directory out of the pod
-  echo "Copying packages from pod ..."
-  kubectl -n "$ns" cp "$name:packages" "$workdir/packages"
+  # sanity check and then copy; specify the container explicitly (-c target)
+  kubectl -n "$ns" exec "$name" -c target -- ls -la /packages >/dev/null 2>&1 \
+    || { echo "ERROR: /packages not found inside image $image" >&2; kubectl -n "$ns" delete pod "$name" --now >/dev/null 2>&1 || true; return 1; }
 
-  # Cleanup the pod
+  echo "Copying packages from pod ..." >&2
+  kubectl -n "$ns" cp -c target "$name:/packages" "$workdir/packages" >/dev/null
+
   kubectl -n "$ns" delete pod "$name" --now --ignore-not-found >/dev/null 2>&1 || true
 
-  echo "Packages staged at: $workdir/packages"
+  echo "Packages staged at: $workdir/packages" >&2
+
+  # --- ONLY the path is printed to stdout ---
   echo "$workdir"
 }
 
@@ -124,13 +127,12 @@ printf "${RESET}"
 # Extract packages (no Docker)
 STAGE_DIR="$(extract_packages_via_k8s "$PKG_IMG")"
 PKG_DIR="$STAGE_DIR/packages"
+dpkg -i "$PKG_DIR"/scone-common_amd64.deb \
+       "$PKG_DIR"/scone-libc_amd64.deb \
+       "$PKG_DIR"/scone-cli_amd64.deb \
+       "$PKG_DIR"/k8s-scone.deb \
+       "$PKG_DIR"/kubectl-scone.deb
 
-# Install the packages (we run as root inside the toolbox container, no sudo needed)
-dpkg -i "$PKG_DIR"/scone-common_amd64.deb
-dpkg -i "$PKG_DIR"/scone-libc_amd64.deb
-dpkg -i "$PKG_DIR"/scone-cli_amd64.deb
-dpkg -i "$PKG_DIR"/k8s-scone.deb
-dpkg -i "$PKG_DIR"/kubectl-scone.deb
 
 # Cleanup staged files
 rm -rf "$STAGE_DIR"
