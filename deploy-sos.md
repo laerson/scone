@@ -6,7 +6,7 @@ This document explains how to deploy the Confidential SCONE OSV Scan to a Kubern
 
 ```bash
 # Variables to configure
-SCONE_CLI_IMAGE="registry.scontain.com/sconecuratedimages/sconecli:alpine-scone5.9.0"
+SCONE_CLI_IMAGE="registry.scontain.com/scone.cloud/sconecli:6.0.7"
 ```
 
 ## Required Environment Variables
@@ -143,10 +143,14 @@ function cas_attest_and_default() {
   PORT_FORWARD_PID=$!
   sleep 5
 
+  # Trust the CAS if signed by EITHER the standard Scontain
+  # signer or the scone.cloud CAS signer.
   scone cas attest localhost \
+    --accept-sw-hardening-needed \
+    --accept-configuration-needed \
+  || scone cas attest localhost \
     --mrsigner 195e5a6df987d6a515dd083750c1ea352283f8364d3ec9142b0d593988c6ed2d \
-    --isvsvn 5 \
-    --isvprodid 41316 \
+    --isvsvn 5 --isvprodid 41316 \
     --accept-sw-hardening-needed \
     --accept-configuration-needed
 
