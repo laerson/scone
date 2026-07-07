@@ -1,4 +1,2 @@
-This file defines the environment variables for the CAS instance.
-
-- `$CAS` - the name of the CAS instance. By default, we set this to `cas`.
-- `$CAS_NAMESPACE` - the Kubernetes namespace for the CAS instance. By default, we set this to `scone-cas`.
+Create a CAS with the following name (e.g., "cas"): `${CAS}`
+Create this CAS in Kubernetes namespace: `${CAS_NAMESPACE}`
